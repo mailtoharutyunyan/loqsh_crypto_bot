@@ -1,0 +1,9 @@
+{
+  "symbols": ["BTCUSDT", "ETHUSDT"],
+  "timeframe": "15m",
+  "htf": ["1h", "4h", "1d"],
+  "tradeTier": "A + B",
+  "minBuckets": 3,
+  "usePullback": false,
+  "minVolatilityPct": 0.0
+}
