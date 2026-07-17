@@ -33,8 +33,13 @@ MAX_HOLD_BARS  = 100      # force-close a trade after N bars if neither TP nor S
 WARMUP         = 220      # bars skipped at the start (EMA200 etc. need history)
 
 
+_HIST_CACHE = {}
+
 def fetch_history(host, symbol, interval, total=3000):
-    """Paginated klines (Binance max 1000/req), CLOSED candles only, oldest→newest."""
+    """Paginated klines (Binance max 1000/req), CLOSED candles only, oldest→newest. Cached."""
+    ck = (symbol, interval, total)
+    if ck in _HIST_CACHE:
+        return _HIST_CACHE[ck]
     out, end = [], None
     while len(out) < total:
         p = {"symbol": symbol, "interval": interval, "limit": 1000}
@@ -55,7 +60,9 @@ def fetch_history(host, symbol, interval, total=3000):
     df = df.drop_duplicates("openTime").sort_values("openTime").reset_index(drop=True)
     import time as _t
     df = df[df["closeTime"] <= int(_t.time()*1000)].reset_index(drop=True)
-    return df.tail(total).reset_index(drop=True)
+    df = df.tail(total).reset_index(drop=True)
+    _HIST_CACHE[ck] = df
+    return df
 
 
 def htf_bull_series(host, symbol, ref_df, cfg):
@@ -75,8 +82,8 @@ def htf_bull_series(host, symbol, ref_df, cfg):
     return bull.astype(int), total.astype(int)
 
 
-def build_votes(df, host, symbol, cfg):
-    """Vectorized 5-bucket votes per bar (mirrors compute_signal, but point-in-time HTF)."""
+def build_features(df, host, symbol, cfg):
+    """Vectorized per-bar features (buckets, scores, filters) — independent of the sweepable gate params."""
     close, openp, high, low, vol = df["close"], df["open"], df["high"], df["low"], df["volume"]
     a = q.atr(df, 14); atrPct = a/close*100
     ema50, ema200 = q.ema(close,50), q.ema(close,200)
@@ -142,23 +149,38 @@ def build_votes(df, host, symbol, cfg):
                +np.where(r<35,5,0)+np.where(bullImb,6,0)+np.where(recentBull,6,0)+np.where(shBelow,8,0)+np.where(cvd>cvdMA,3,0))
     scoreBear=((htfTotal-htfBull)*3+np.where(close<ema50,4,0)+np.where(close<ema200,3,0)+np.where(macdH<0,4,0)
                +np.where(r>65,5,0)+np.where(bearImb,6,0)+np.where(recentBear,6,0)+np.where(shAbove,8,0)+np.where(cvd<cvdMA,3,0))
-    # filters
-    volOk=volRatio>=cfg["minVolumeRatio"]
-    volaOk=(atrPct<=cfg["maxVolatilityPct"])&(atrPct>=cfg["minVolatilityPct"])
-    trOk=adx>cfg["minADX"]
-    base=(volOk&volaOk&trOk).values
+    ema21=q.ema(close,21)
+    pbLongRaw=((low.rolling(3).min()<=ema21)&(close>ema21)).values
+    pbShortRaw=((high.rolling(3).max()>=ema21)&(close<ema21)).values
+    return {
+        "df":df, "av":a.values,
+        "bullBk":bullBk, "bearBk":bearBk,
+        "scoreBull":scoreBull, "scoreBear":scoreBear, "minScore":minScore, "scoreDiff":scoreDiff,
+        "atrPct":atrPct.values, "volRatio":volRatio.values, "adx":adx.values,
+        "pbLongRaw":pbLongRaw, "pbShortRaw":pbShortRaw,
+    }
 
+
+def gate(feat, cfg):
+    """Apply the sweepable gate (tier / minBuckets / filters / pullback) → long/short signal arrays."""
+    atrPct, volRatio, adx = feat["atrPct"], feat["volRatio"], feat["adx"]
+    base = (volRatio>=cfg["minVolumeRatio"]) & (atrPct<=cfg["maxVolatilityPct"]) & \
+           (atrPct>=cfg["minVolatilityPct"]) & (adx>cfg["minADX"])
+    bullBk, bearBk = feat["bullBk"], feat["bearBk"]
+    minScore, scoreDiff = feat["minScore"], feat["scoreDiff"]
     def tier(bk,sc,opp):
         edge=(sc>=minScore)&(sc>opp+scoreDiff)
         return np.where((bk>=4)&edge,1,np.where((bk>=3)&(sc>=minScore),2,np.where(bk>=cfg["minBuckets"],3,0)))
     tierCap=1 if cfg["tradeTier"]=="A only" else (2 if cfg["tradeTier"]=="A + B" else 3)
     rawBull=(bullBk>=cfg["minBuckets"])&(bearBk<=cfg["maxOpposite"])&(bullBk>bearBk)
     rawBear=(bearBk>=cfg["minBuckets"])&(bullBk<=cfg["maxOpposite"])&(bearBk>bullBk)
-    tB=np.where(rawBull,tier(bullBk,scoreBull,scoreBear),0)
-    tS=np.where(rawBear,tier(bearBk,scoreBear,scoreBull),0)
+    tB=np.where(rawBull,tier(bullBk,feat["scoreBull"],feat["scoreBear"]),0)
+    tS=np.where(rawBear,tier(bearBk,feat["scoreBear"],feat["scoreBull"]),0)
     longSig=base&(tB>0)&(tB<=tierCap)
     shortSig=base&(tS>0)&(tS<=tierCap)
-    return longSig,shortSig,a.values
+    if cfg["usePullback"]:
+        longSig=longSig&feat["pbLongRaw"]; shortSig=shortSig&feat["pbShortRaw"]
+    return longSig, shortSig
 
 
 def simulate(df,longSig,shortSig,av,cfg):
@@ -239,8 +261,9 @@ def main():
     df=fetch_history(host,sym,tf,bars)
     if len(df)<WARMUP+50:
         print(f"not enough history ({len(df)} bars)"); return
-    longSig,shortSig,av=build_votes(df,host,sym,cfg)
-    trades=simulate(df,longSig,shortSig,av,cfg)
+    feat=build_features(df,host,sym,cfg)
+    longSig,shortSig=gate(feat,cfg)
+    trades=simulate(df,longSig,shortSig,feat["av"],cfg)
     show("OVERALL",metrics(trades))
     # out-of-sample stability: split trades into 4 sequential segments
     if trades:

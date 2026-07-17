@@ -442,44 +442,49 @@ def fmt(x):
     return f"{x:,.6f}".rstrip("0").rstrip(".") if x < 100 else f"{x:,.2f}"
 
 
+def build_worklist(cfg):
+    """Explicit (symbol, timeframe) pairs if `pairs` is set, else symbols × timeframes."""
+    if cfg.get("pairs"):
+        return [(p["symbol"], p["timeframe"]) for p in cfg["pairs"]]
+    tfs = cfg.get("timeframes") or [cfg["timeframe"]]
+    return [(s, tf) for tf in tfs for s in cfg["symbols"]]
+
+
 def main():
     cfg = load_config()
     host = cfg["data_host"]
-    # scan every timeframe in `timeframes` (falls back to the single `timeframe`)
-    timeframes = cfg.get("timeframes") or [cfg["timeframe"]]
     state = load_state()
     changed = False
     sent = 0
 
-    for tf in timeframes:
-        cfg["timeframe"] = tf                         # compute_signal reads this (regime / structLookback)
+    for sym, tf in build_worklist(cfg):
+        cfg["timeframe"] = tf                          # compute_signal reads this (regime / structLookback)
         interval_ms = INTERVAL_MS.get(tf, 900_000)
-        for sym in cfg["symbols"]:
-            key = f"{sym}|{tf}"
-            try:
-                df = fetch_klines(host, sym, tf, cfg["limit"])
-                sig = compute_signal(cfg, host, sym, df)
-            except Exception as e:
-                print(f"[{sym} {tf}] error: {e}"); continue
+        key = f"{sym}|{tf}"
+        try:
+            df = fetch_klines(host, sym, tf, cfg["limit"])
+            sig = compute_signal(cfg, host, sym, df)
+        except Exception as e:
+            print(f"[{sym} {tf}] error: {e}"); continue
 
-            if not sig:
-                print(f"[{sym} {tf}] no signal"); continue
+        if not sig:
+            print(f"[{sym} {tf}] no signal"); continue
 
-            prev = state.get(key, {})
-            # de-dup: one alert per bar; mirror Pine's no-flip-flop + cooldown
-            if prev.get("last_bar") == sig["bar_time"]:
-                print(f"[{sym} {tf}] already alerted this bar"); continue
-            cooldown_ok = (sig["bar_time"] - prev.get("last_bar", 0)) >= cfg["cooldownBars"] * interval_ms
-            same_dir = prev.get("last_dir") == sig["dir"]
-            if not cfg["allowRepeatDirection"] and same_dir:
-                print(f"[{sym} {tf}] {sig['side']} suppressed (same direction as last signal)"); continue
-            if prev and not cooldown_ok:
-                print(f"[{sym} {tf}] {sig['side']} suppressed (cooldown)"); continue
+        prev = state.get(key, {})
+        # de-dup: one alert per bar; mirror Pine's no-flip-flop + cooldown
+        if prev.get("last_bar") == sig["bar_time"]:
+            print(f"[{sym} {tf}] already alerted this bar"); continue
+        cooldown_ok = (sig["bar_time"] - prev.get("last_bar", 0)) >= cfg["cooldownBars"] * interval_ms
+        same_dir = prev.get("last_dir") == sig["dir"]
+        if not cfg["allowRepeatDirection"] and same_dir:
+            print(f"[{sym} {tf}] {sig['side']} suppressed (same direction as last signal)"); continue
+        if prev and not cooldown_ok:
+            print(f"[{sym} {tf}] {sig['side']} suppressed (cooldown)"); continue
 
-            send_telegram(build_message(sig, sym, tf))
-            print(f"[{sym} {tf}] SENT: {sig['side']} [{sig['tier']}] {sig['buckets']}/5")
-            state[key] = {"last_bar": sig["bar_time"], "last_dir": sig["dir"]}
-            changed = True; sent += 1
+        send_telegram(build_message(sig, sym, tf))
+        print(f"[{sym} {tf}] SENT: {sig['side']} [{sig['tier']}] {sig['buckets']}/5")
+        state[key] = {"last_bar": sig["bar_time"], "last_dir": sig["dir"]}
+        changed = True; sent += 1
 
     if changed:
         save_state(state)

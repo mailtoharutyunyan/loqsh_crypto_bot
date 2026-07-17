@@ -1,6 +1,15 @@
 {
-  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "TONUSDT", "SUIUSDT", "APTUSDT"],
-  "timeframes": ["15m", "1h", "4h", "1d", "1w"],
+  "_comment": "Robust (symbol,timeframe) pairs from sweep.py — each stayed profitable across 3-4/4 out-of-sample segments. Global params = winning combo (A+B, 3 buckets, no pullback).",
+  "pairs": [
+    {"symbol": "ADAUSDT", "timeframe": "1h"},
+    {"symbol": "XRPUSDT", "timeframe": "1h"},
+    {"symbol": "ETHUSDT", "timeframe": "1h"},
+    {"symbol": "BNBUSDT", "timeframe": "1h"},
+    {"symbol": "SOLUSDT", "timeframe": "4h"},
+    {"symbol": "ADAUSDT", "timeframe": "4h"},
+    {"symbol": "ETHUSDT", "timeframe": "15m"},
+    {"symbol": "LINKUSDT", "timeframe": "1d"}
+  ],
   "tradeTier": "A + B",
   "minBuckets": 3,
   "usePullback": false,
