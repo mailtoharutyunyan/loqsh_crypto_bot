@@ -1,0 +1,50 @@
+{
+  "ETHUSDT|15m": {
+    "last_bar": 1784246399999,
+    "last_dir": -1
+  },
+  "ETHUSDT|1h": {
+    "last_bar": 1784246399999,
+    "last_dir": -1
+  },
+  "SOLUSDT|1h": {
+    "last_bar": 1784246399999,
+    "last_dir": -1
+  },
+  "DOGEUSDT|1h": {
+    "last_bar": 1784246399999,
+    "last_dir": -1
+  },
+  "AVAXUSDT|1h": {
+    "last_bar": 1784246399999,
+    "last_dir": -1
+  },
+  "BTCUSDT|15m": {
+    "last_bar": 1784247299999,
+    "last_dir": -1
+  },
+  "SOLUSDT|15m": {
+    "last_bar": 1784247299999,
+    "last_dir": -1
+  },
+  "BNBUSDT|15m": {
+    "last_bar": 1784247299999,
+    "last_dir": -1
+  },
+  "XRPUSDT|15m": {
+    "last_bar": 1784247299999,
+    "last_dir": -1
+  },
+  "AVAXUSDT|15m": {
+    "last_bar": 1784247299999,
+    "last_dir": -1
+  },
+  "SUIUSDT|15m": {
+    "last_bar": 1784247299999,
+    "last_dir": -1
+  },
+  "BTCUSDT|1d": {
+    "last_bar": 1784246399999,
+    "last_dir": -1
+  }
+}

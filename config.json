@@ -1,7 +1,6 @@
 {
-  "symbols": ["BTCUSDT", "ETHUSDT"],
-  "timeframe": "15m",
-  "htf": ["1h", "4h", "1d"],
+  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "TONUSDT", "SUIUSDT", "APTUSDT"],
+  "timeframes": ["15m", "1h", "4h", "1d", "1w"],
   "tradeTier": "A + B",
   "minBuckets": 3,
   "usePullback": false,

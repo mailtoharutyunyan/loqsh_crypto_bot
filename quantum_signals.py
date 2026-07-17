@@ -20,8 +20,9 @@ import requests
 DEFAULTS = {
     "data_host": "https://data-api.binance.vision",  # public Binance data (no auth, no US geo-block)
     "symbols": ["BTCUSDT"],
-    "timeframe": "15m",
-    "htf": ["1h", "4h", "1d"],
+    "timeframe": "15m",              # fallback when `timeframes` is not set
+    "timeframes": ["15m", "1h", "4h", "1d", "1w"],   # scan each per symbol (1m excluded: unusable on cron)
+    "htf": ["1h", "4h", "1d"],       # fallback only; HTF is derived per-TF via higher_tfs()
     "limit": 600,                    # candles to fetch (warmup for EMA200 / VP)
     # signal gate (bucket confluence)
     "minBuckets": 3,
@@ -56,9 +57,20 @@ DEFAULTS = {
 
 INTERVAL_MS = {"1m":60_000,"3m":180_000,"5m":300_000,"15m":900_000,"30m":1_800_000,
                "1h":3_600_000,"2h":7_200_000,"4h":14_400_000,"6h":21_600_000,
-               "8h":28_800_000,"12h":43_200_000,"1d":86_400_000}
+               "8h":28_800_000,"12h":43_200_000,"1d":86_400_000,"3d":259_200_000,
+               "1w":604_800_000,"1M":2_592_000_000}
+
+# Coarse ladder for higher-timeframe trend confirmation (picks the next 3 above the signal TF)
+HTF_LADDER = ["15m", "1h", "4h", "1d", "1w", "1M"]
 
 STATE_FILE = "state.json"
+
+
+def higher_tfs(cfg):
+    tf = cfg["timeframe"]
+    if tf in HTF_LADDER:
+        return HTF_LADDER[HTF_LADDER.index(tf)+1:][:3]
+    return cfg.get("htf", ["1h", "4h", "1d"])
 
 
 def load_config():
@@ -72,12 +84,24 @@ def load_config():
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA
 # ─────────────────────────────────────────────────────────────────────────────
+_KLINE_CACHE = {}
+
 def fetch_klines(host, symbol, interval, limit):
-    """Return a DataFrame of CLOSED candles only (drops the still-forming one)."""
+    """Return a DataFrame of CLOSED candles only (drops the still-forming one). Cached per run, retries transient errors."""
+    ck = (symbol, interval, limit)
+    if ck in _KLINE_CACHE:
+        return _KLINE_CACHE[ck]
     url = f"{host}/api/v3/klines"
-    r = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=20)
-    r.raise_for_status()
-    rows = r.json()
+    rows = None; last = None
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=20)
+            r.raise_for_status()
+            rows = r.json(); break
+        except Exception as e:
+            last = e; time.sleep(1.5 * (attempt + 1))
+    if rows is None:
+        raise last
     df = pd.DataFrame(rows, columns=["openTime","open","high","low","close","volume",
                                      "closeTime","qav","trades","tbav","tqav","ignore"])
     for c in ("open","high","low","close","volume"):
@@ -85,6 +109,7 @@ def fetch_klines(host, symbol, interval, limit):
     df["closeTime"] = df["closeTime"].astype("int64")
     now_ms = int(time.time() * 1000)
     df = df[df["closeTime"] <= now_ms].reset_index(drop=True)   # keep only closed bars
+    _KLINE_CACHE[ck] = df
     return df
 
 
@@ -203,17 +228,18 @@ def volume_profile(df, length, bins, va_pct):
 # SIGNAL ENGINE  (5 confluence buckets + A/B/C tiers — ported from the strategy)
 # ─────────────────────────────────────────────────────────────────────────────
 def htf_bull_count(cfg, host, symbol):
-    """No-repaint HTF trend: last CLOSED HTF bar, close vs its EMA21."""
-    bull = 0
-    for tf in cfg["htf"]:
+    """No-repaint HTF trend on the timeframes above the signal TF: last CLOSED HTF bar, close vs EMA21.
+    Returns (bull, total) where total = HTFs actually evaluated (varies by signal TF)."""
+    bull = total = 0
+    for tf in higher_tfs(cfg):
         try:
             d = fetch_klines(host, symbol, tf, 300)
             if len(d) < 25: continue
-            e21 = ema(d["close"], 21).iloc[-1]
-            if d["close"].iloc[-1] > e21: bull += 1
+            total += 1
+            if d["close"].iloc[-1] > ema(d["close"], 21).iloc[-1]: bull += 1
         except Exception as e:
             print(f"  [htf {tf}] fetch failed: {e}")
-    return bull
+    return bull, total
 
 def compute_signal(cfg, host, symbol, df):
     if len(df) < 210:
@@ -268,11 +294,12 @@ def compute_signal(cfg, host, symbol, df):
 
     # ── evaluate LAST CLOSED bar ──
     i = -1
-    htfBull = htf_bull_count(cfg, host, symbol)
-    htfBear = 3 - htfBull
+    htfBull, htfTotal = htf_bull_count(cfg, host, symbol)
+    htfBear = htfTotal - htfBull
+    need = min(2, htfTotal) if htfTotal > 0 else 99   # need 2 aligned when >=2 HTFs exist, else all available
     c = float(close.iloc[i]); st = float(stDir.iloc[i]); trend = int(trend_s[i])
 
-    vTrend = 1 if (htfBull >= 2 and c > ema50.iloc[i] and st == -1) else (-1 if (htfBear >= 2 and c < ema50.iloc[i] and st == 1) else 0)
+    vTrend = 1 if (htfBull >= need and c > ema50.iloc[i] and st == -1) else (-1 if (htfBear >= need and c < ema50.iloc[i] and st == 1) else 0)
     vMom   = 1 if (macdH.iloc[i] > 0 and diP.iloc[i] > diM.iloc[i] and r.iloc[i] < 78) else (-1 if (macdH.iloc[i] < 0 and diM.iloc[i] > diP.iloc[i] and r.iloc[i] > 22) else 0)
     vStruct = 1 if (recentBull and not recentBear) else (-1 if (recentBear and not recentBull) else 0)
     flowBull = (cvd.iloc[i] > cvdMA.iloc[i]) and (bool(bullImb.iloc[i]) or (volRatio.iloc[i] >= cfg["minVolumeRatio"] and bool(bullCandle.iloc[i])))
@@ -347,7 +374,7 @@ def compute_signal(cfg, host, symbol, df):
         "rr": cfg["tp2R"],
         "votes": {"trend": vTrend, "mom": vMom, "struct": vStruct, "flow": vFlow, "loc": vLoc},
         "adx": float(adx.iloc[i]), "rsi": float(r.iloc[i]),
-        "htfBull": htfBull, "atrPct": float(atrPct.iloc[i]),
+        "htfBull": htfBull, "htfTotal": htfTotal, "atrPct": float(atrPct.iloc[i]),
         "bar_time": int(df["closeTime"].iloc[-1]),
         "dir": 1 if side == "LONG" else -1,
     }
@@ -396,10 +423,9 @@ def build_message(sig, sym, tf):
         f"📊 <b>Confluence</b>",
         f"    {mark(v['trend'])} Trend    {mark(v['mom'])} Momentum    {mark(v['struct'])} Structure",
         f"    {mark(v['flow'])} Flow     {mark(v['loc'])} Location",
-        f"📈 ADX <b>{sig['adx']:.0f}</b>   ·   RSI <b>{sig['rsi']:.0f}</b>   ·   HTF <b>{sig['htfBull']}/3</b> bull   ·   ATR <b>{sig['atrPct']:.2f}%</b>",
+        f"📈 ADX <b>{sig['adx']:.0f}</b>   ·   RSI <b>{sig['rsi']:.0f}</b>   ·   HTF <b>{sig['htfBull']}/{sig['htfTotal']}</b> bull   ·   ATR <b>{sig['atrPct']:.2f}%</b>",
         "━━━━━━━━━━━━━━━━━━",
-        "⚠️ <i>Signal only — confirm on your chart and size your own risk. Not financial advice.</i>",
-        f"🕐 {ts}",
+        f"⚡ <b>Quantum Pro Signals</b>   ·   🕐 {ts}",
     ])
 
 def load_state():
@@ -419,41 +445,45 @@ def fmt(x):
 def main():
     cfg = load_config()
     host = cfg["data_host"]
-    tf = cfg["timeframe"]
-    interval_ms = INTERVAL_MS.get(tf, 900_000)
+    # scan every timeframe in `timeframes` (falls back to the single `timeframe`)
+    timeframes = cfg.get("timeframes") or [cfg["timeframe"]]
     state = load_state()
     changed = False
+    sent = 0
 
-    for sym in cfg["symbols"]:
-        key = f"{sym}|{tf}"
-        try:
-            df = fetch_klines(host, sym, tf, cfg["limit"])
-            sig = compute_signal(cfg, host, sym, df)
-        except Exception as e:
-            print(f"[{sym}] error: {e}"); continue
+    for tf in timeframes:
+        cfg["timeframe"] = tf                         # compute_signal reads this (regime / structLookback)
+        interval_ms = INTERVAL_MS.get(tf, 900_000)
+        for sym in cfg["symbols"]:
+            key = f"{sym}|{tf}"
+            try:
+                df = fetch_klines(host, sym, tf, cfg["limit"])
+                sig = compute_signal(cfg, host, sym, df)
+            except Exception as e:
+                print(f"[{sym} {tf}] error: {e}"); continue
 
-        if not sig:
-            print(f"[{sym} {tf}] no signal on last closed bar"); continue
+            if not sig:
+                print(f"[{sym} {tf}] no signal"); continue
 
-        prev = state.get(key, {})
-        # de-dup: one alert per bar; mirror Pine's no-flip-flop + cooldown
-        if prev.get("last_bar") == sig["bar_time"]:
-            print(f"[{sym} {tf}] already alerted this bar"); continue
-        cooldown_ok = (sig["bar_time"] - prev.get("last_bar", 0)) >= cfg["cooldownBars"] * interval_ms
-        same_dir = prev.get("last_dir") == sig["dir"]
-        if not cfg["allowRepeatDirection"] and same_dir:
-            print(f"[{sym} {tf}] {sig['side']} suppressed (same direction as last signal)"); continue
-        if prev and not cooldown_ok:
-            print(f"[{sym} {tf}] {sig['side']} suppressed (cooldown)"); continue
+            prev = state.get(key, {})
+            # de-dup: one alert per bar; mirror Pine's no-flip-flop + cooldown
+            if prev.get("last_bar") == sig["bar_time"]:
+                print(f"[{sym} {tf}] already alerted this bar"); continue
+            cooldown_ok = (sig["bar_time"] - prev.get("last_bar", 0)) >= cfg["cooldownBars"] * interval_ms
+            same_dir = prev.get("last_dir") == sig["dir"]
+            if not cfg["allowRepeatDirection"] and same_dir:
+                print(f"[{sym} {tf}] {sig['side']} suppressed (same direction as last signal)"); continue
+            if prev and not cooldown_ok:
+                print(f"[{sym} {tf}] {sig['side']} suppressed (cooldown)"); continue
 
-        send_telegram(build_message(sig, sym, tf))
-        print(f"[{sym} {tf}] SENT: {sig['side']} [{sig['tier']}] {sig['buckets']}/5")
-        state[key] = {"last_bar": sig["bar_time"], "last_dir": sig["dir"]}
-        changed = True
+            send_telegram(build_message(sig, sym, tf))
+            print(f"[{sym} {tf}] SENT: {sig['side']} [{sig['tier']}] {sig['buckets']}/5")
+            state[key] = {"last_bar": sig["bar_time"], "last_dir": sig["dir"]}
+            changed = True; sent += 1
 
     if changed:
         save_state(state)
-    print("done." + ("" if changed else " (state unchanged)"))
+    print(f"done. {sent} sent." + ("" if changed else " (state unchanged)"))
 
 
 if __name__ == "__main__":
