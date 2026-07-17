@@ -9,7 +9,7 @@ for each configured symbol/timeframe, and pushes BUY/SELL alerts to Telegram.
    It ports the 5-bucket confluence + A/B/C tier logic faithfully. Validate parity
    against TradingView and paper-trade before trusting it with capital.
 """
-import os, json, time, sys
+import os, json, time, sys, datetime
 import numpy as np
 import pandas as pd
 import requests
@@ -344,6 +344,10 @@ def compute_signal(cfg, host, symbol, df):
     return {
         "side": side, "tier": "ABC"[tier-1], "buckets": buckets,
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2,
+        "rr": cfg["tp2R"],
+        "votes": {"trend": vTrend, "mom": vMom, "struct": vStruct, "flow": vFlow, "loc": vLoc},
+        "adx": float(adx.iloc[i]), "rsi": float(r.iloc[i]),
+        "htfBull": htfBull, "atrPct": float(atrPct.iloc[i]),
         "bar_time": int(df["closeTime"].iloc[-1]),
         "dir": 1 if side == "LONG" else -1,
     }
@@ -358,9 +362,45 @@ def send_telegram(text):
         print("  [telegram] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — printing instead:")
         print(text); return
     r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                      json={"chat_id": chat, "text": text}, timeout=20)
+                      json={"chat_id": chat, "text": text, "parse_mode": "HTML",
+                            "disable_web_page_preview": True}, timeout=20)
     if not r.ok:
         print(f"  [telegram] send failed {r.status_code}: {r.text}")
+
+
+def build_message(sig, sym, tf):
+    """Rich HTML Telegram card: icons, full labels, %-distances, R:R, bucket breakdown, context."""
+    is_long = sig["side"] == "LONG"
+    head = "🟢🟢🟢" if is_long else "🔴🔴🔴"
+    verb = "LONG · BUY" if is_long else "SHORT · SELL"
+    entry = sig["entry"]
+    def pct(level):
+        return f"{(level/entry - 1)*100:+.2f}%"
+    want = 1 if is_long else -1
+    def mark(v):  # ✅ agrees with signal, ❌ opposes, ➖ neutral
+        return "✅" if v == want else ("❌" if v == -want else "➖")
+    v = sig["votes"]
+    tier_word = {"A": "A · Strong", "B": "B · Solid", "C": "C · Weak"}.get(sig["tier"], sig["tier"])
+    ts = datetime.datetime.fromtimestamp(sig["bar_time"]/1000, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return "\n".join([
+        f"{head}",
+        f"<b>{verb}</b>   ·   <b>{sym}</b>   ·   {tf}",
+        f"🏆 Tier <b>{tier_word}</b>    🎯 Confluence <b>{sig['buckets']}/5</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"💰 <b>Entry</b>              <code>{fmt(entry)}</code>",
+        f"🛑 <b>Stop Loss</b>       <code>{fmt(sig['sl'])}</code>   ({pct(sig['sl'])})",
+        f"✅ <b>Take Profit 1</b>  <code>{fmt(sig['tp1'])}</code>   ({pct(sig['tp1'])})",
+        f"🚀 <b>Take Profit 2</b>  <code>{fmt(sig['tp2'])}</code>   ({pct(sig['tp2'])})",
+        "━━━━━━━━━━━━━━━━━━",
+        f"⚖️ <b>Risk / Reward</b>   1 : {sig['rr']:.1f}",
+        f"📊 <b>Confluence</b>",
+        f"    {mark(v['trend'])} Trend    {mark(v['mom'])} Momentum    {mark(v['struct'])} Structure",
+        f"    {mark(v['flow'])} Flow     {mark(v['loc'])} Location",
+        f"📈 ADX <b>{sig['adx']:.0f}</b>   ·   RSI <b>{sig['rsi']:.0f}</b>   ·   HTF <b>{sig['htfBull']}/3</b> bull   ·   ATR <b>{sig['atrPct']:.2f}%</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        "⚠️ <i>Signal only — confirm on your chart and size your own risk. Not financial advice.</i>",
+        f"🕐 {ts}",
+    ])
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -406,14 +446,7 @@ def main():
         if prev and not cooldown_ok:
             print(f"[{sym} {tf}] {sig['side']} suppressed (cooldown)"); continue
 
-        emoji = "🟢" if sig["side"] == "LONG" else "🔴"
-        msg = (f"{emoji} QP {sig['side']} [{sig['tier']}] {sym} · {tf}\n"
-               f"entry {fmt(sig['entry'])}\n"
-               f"SL   {fmt(sig['sl'])}\n"
-               f"TP1  {fmt(sig['tp1'])}\n"
-               f"TP2  {fmt(sig['tp2'])}\n"
-               f"buckets {sig['buckets']}/5  ·  ⚠ signal only — validate & size your own risk")
-        send_telegram(msg)
+        send_telegram(build_message(sig, sym, tf))
         print(f"[{sym} {tf}] SENT: {sig['side']} [{sig['tier']}] {sig['buckets']}/5")
         state[key] = {"last_bar": sig["bar_time"], "last_dir": sig["dir"]}
         changed = True
