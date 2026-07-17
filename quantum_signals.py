@@ -53,6 +53,7 @@ DEFAULTS = {
     # signal spacing (mirror Pine: no repeat direction until opposite fires, + cooldown bars)
     "allowRepeatDirection": False,
     "cooldownBars": 4,
+    "heartbeat": True,               # once-a-day "bot alive" post so the channel is never silent
 }
 
 INTERVAL_MS = {"1m":60_000,"3m":180_000,"5m":300_000,"15m":900_000,"30m":1_800_000,
@@ -485,6 +486,17 @@ def main():
         print(f"[{sym} {tf}] SENT: {sig['side']} [{sig['tier']}] {sig['buckets']}/5")
         state[key] = {"last_bar": sig["bar_time"], "last_dir": sig["dir"]}
         changed = True; sent += 1
+
+    # daily heartbeat (once per UTC day) so the channel is never silent on quiet days
+    if cfg.get("heartbeat", True):
+        today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        if state.get("_heartbeat_day") != today:
+            n = len(build_worklist(cfg))
+            send_telegram(f"✅ <b>Quantum Pro</b> — online · monitoring <b>{n}</b> pairs · {today}\n"
+                          f"<i>Scanning 24/7. A signal card is posted the moment a setup triggers.</i>")
+            state["_heartbeat_day"] = today
+            changed = True
+            print(f"[heartbeat] sent for {today}")
 
     if changed:
         save_state(state)
