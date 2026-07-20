@@ -15,5 +15,9 @@
   "ADAUSDT|1h": {
     "last_bar": 1784332799999,
     "last_dir": 1
+  },
+  "XRPUSDT|1h": {
+    "last_bar": 1784530799999,
+    "last_dir": -1
   }
 }
