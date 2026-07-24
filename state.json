@@ -23,5 +23,9 @@
   "ADAUSDT|4h": {
     "last_bar": 1784735999999,
     "last_dir": 1
+  },
+  "SOLUSDT|4h": {
+    "last_bar": 1784894399999,
+    "last_dir": -1
   }
 }
